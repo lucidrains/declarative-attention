@@ -1,6 +1,6 @@
 ## system2-attention (wip)
 
-Implementation of the procedure in [Language Models Can Control Their Own Attention](https://arxiv.org/abs/2609.02737), from KAIST AI
+Implementation of the procedure in [Language Models Can Control Their Own Attention](https://arxiv.org/abs/2609.02737), from Namgyu Ho et al. of KAIST AI
 
 ## Citations
 
