@@ -1,4 +1,4 @@
-## system2-attention (wip)
+## Declarative Attention - (wip)
 
 Implementation of the procedure in [Language Models Can Control Their Own Attention](https://arxiv.org/abs/2609.02737), from Namgyu Ho et al. of KAIST AI
 
