@@ -1,0 +1,67 @@
+[project]
+name = "declarative-attention"
+version = "0.0.4"
+description = "Declarative Attention - Pytorch"
+authors = [
+    { name = "Phil Wang", email = "lucidrains@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">= 3.10"
+license = { file = "LICENSE" }
+keywords = [
+    'artificial intelligence',
+    'deep learning',
+    'attention mechanisms'
+]
+
+classifiers=[
+    'Development Status :: 4 - Beta',
+    'Intended Audience :: Developers',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3.10',
+]
+
+dependencies = [
+    "einops>=0.8.1",
+    "python-statemachine>=2.5",
+    "torch-einops-utils",
+    "torch>=2.5",
+]
+
+[project.urls]
+Homepage = "https://pypi.org/project/declarative-attention/"
+Repository = "https://github.com/lucidrains/declarative-attention"
+
+[project.optional-dependencies]
+examples = []
+test = [
+    "pytest"
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build]
+include = [
+    "declarative_attention",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["declarative_attention"]
