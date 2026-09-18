@@ -1,6 +1,6 @@
 [project]
 name = "declarative-attention"
-version = "0.0.4"
+version = "0.0.5"
 description = "Declarative Attention - Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -24,7 +24,7 @@ classifiers=[
 
 dependencies = [
     "einops>=0.8.1",
-    "python-statemachine>=2.5",
+    "jinja2",
     "torch-einops-utils",
     "torch>=2.5",
 ]
@@ -36,7 +36,8 @@ Repository = "https://github.com/lucidrains/declarative-attention"
 [project.optional-dependencies]
 examples = []
 test = [
-    "pytest"
+    "pytest",
+    "x-transformers>=2.28.9"
 ]
 
 [tool.pytest.ini_options]
