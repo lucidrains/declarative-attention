@@ -100,6 +100,14 @@ def test_batched_generation_with_mixed_temperatures():
 
     assert out.shape == (2, 6)
 
+    single_out = wrapper.generate(
+        torch.tensor([[1, 2, 3]]),
+        seq_len = 6,
+        state_machine = da1
+    )
+
+    assert torch.equal(out[0], single_out[0])
+
 def test_generation_two_vs_one_parity():
     torch.manual_seed(42)
     wrapper = make_wrapper(dim = 32, depth = 2, heads = 2)

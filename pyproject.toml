@@ -1,6 +1,6 @@
 [project]
 name = "declarative-attention"
-version = "0.0.5"
+version = "0.0.6"
 description = "Declarative Attention - Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }

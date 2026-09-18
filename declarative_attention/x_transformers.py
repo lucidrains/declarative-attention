@@ -24,6 +24,28 @@ from declarative_attention.declarative_attention import (
 
 # helper sampling function
 
+def log(t, eps = None):
+    eps = default(eps, torch.finfo(t.dtype).eps)
+    return torch.log(t.clamp(min = eps, max = 1. - eps))
+
+def gumbel_noise(t):
+    noise = torch.rand_like(t)
+    return -log(-log(noise))
+
+def gumbel_sample(logits, temperature = 1., dim = -1, keepdim = True):
+    if not isinstance(temperature, Tensor):
+        temperature = torch.tensor(temperature, device = logits.device, dtype = logits.dtype)
+
+    if temperature.ndim == 1:
+        temperature = rearrange(temperature, 'b -> b 1')
+
+    if (temperature == 0.).all():
+        return logits.argmax(dim = dim, keepdim = keepdim)
+
+    noise = gumbel_noise(logits)
+
+    return (logits + noise * temperature).argmax(dim = dim, keepdim = keepdim)
+
 def top_k(logits, thres = 0.9):
     k = max(int((1 - thres) * logits.shape[-1]), 1)
     val, ind = torch.topk(logits, k)
@@ -34,15 +56,13 @@ def top_k(logits, thres = 0.9):
 # autoregressive wrapper for declarative attention
 
 class DeclarativeAttentionWrapper(nn.Module):
-    """
-    simple autoregressive wrapper for declarative attention
-
-    training derives the 2d causal DA mask from the full sequence; generation
-    streams sampled tokens through the state machine and passes the per-step KV
-    mask to the model
-
-    any machine exposing `step`, `get_mask` and `state` can be driven this way
-    """
+    # simple autoregressive wrapper for declarative attention
+    #
+    # training derives the 2d causal DA mask from the full sequence, generation
+    # streams sampled tokens through the state machine and passes the per-step
+    # KV mask to the model
+    #
+    # any machine exposing `step`, `get_mask` and `state` can be driven this way
 
     def __init__(
         self,
@@ -100,23 +120,26 @@ class DeclarativeAttentionWrapper(nn.Module):
         eos_token: int | None = None,
         **kwargs
     ):
-        batch = len(prompts) if isinstance(prompts, (list, tuple)) else (prompts.shape[0] if prompts.ndim > 1 else 1)
-
-        machines = state_machine
-        if not exists(machines) and exists(chunk_spans):
-            spans = list(chunk_spans) if is_batched_spans(chunk_spans) else [chunk_spans] * batch
-            machines = [DeclarativeAttention(s, tokenizer_decode = self.tokenizer_decode) for s in spans]
-        elif exists(machines) and not isinstance(machines, (list, tuple)):
-            machines = [machines] * batch
-
         if isinstance(prompts, list):
             prompts = pad_sequence(prompts)
 
         prompts, ps = pack([prompts], '* n')
+        batch = prompts.shape[0]
+
+        machines = state_machine
+
+        if exists(machines) and not isinstance(machines, (list, tuple)):
+            machines = [machines] * batch
+
+        if not exists(machines) and exists(chunk_spans):
+            spans = list(chunk_spans) if is_batched_spans(chunk_spans) else [chunk_spans] * batch
+            machines = [DeclarativeAttention(s, tokenizer_decode = self.tokenizer_decode) for s in spans]
+
         out = prompts
         t = prompts.shape[-1]
         cache = None
         sample = None
+        is_eos_tokens = None
 
         for _ in range(seq_len):
             if exists(machines) and exists(sample):
@@ -167,26 +190,17 @@ class DeclarativeAttentionWrapper(nn.Module):
 
             filtered_logits = step_filter(logits, **step_filter_kw)
             temps = torch.tensor(temps, device = out.device, dtype = logits.dtype)
-
-            if (temps == 0.).all():
-                sample = logits.argmax(dim = -1, keepdim = True)
-            elif not (temps == 0.).any():
-                probs = F.softmax(filtered_logits / rearrange(temps, 'b -> b 1'), dim = -1)
-                sample = torch.multinomial(probs, 1)
-            else:
-                greedy_sample = logits.argmax(dim = -1, keepdim = True)
-                probs = F.softmax(filtered_logits / rearrange(temps.clamp(min = 1e-5), 'b -> b 1'), dim = -1)
-                stochastic_sample = torch.multinomial(probs, 1)
-                sample = torch.where(rearrange(temps == 0., 'b -> b 1'), greedy_sample, stochastic_sample)
+            sample = gumbel_sample(filtered_logits, temperature = temps)
 
             out = torch.cat((out, sample), dim = -1)
 
             if exists(eos_token):
                 is_eos_tokens = (out == eos_token)
+
                 if is_eos_tokens.any(dim = -1).all():
                     break
 
-        if exists(eos_token):
+        if exists(eos_token) and exists(is_eos_tokens):
             shifted = F.pad(is_eos_tokens, (1, -1))
             mask = shifted.float().cumsum(dim = -1) >= 1
             out = out.masked_fill(mask, self.pad_value)

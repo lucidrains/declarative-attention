@@ -12,7 +12,6 @@ from torch import Tensor
 from einops import rearrange, reduce
 
 from torch_einops_utils import (
-    pack_with_inverse,
     pad_right_at_dim,
     tree_flatten_with_inverse,
     tree_map_tensor
@@ -26,9 +25,6 @@ def exists(val):
 def default(val, fallback):
     return val if exists(val) else fallback
 
-def identity(t):
-    return t
-
 def default_decode_fn(token):
     return chr(token) if 0 <= token < 128 else ''
 
@@ -38,13 +34,16 @@ def is_span(value):
 def is_batched_spans(chunk_spans):
     if not isinstance(chunk_spans, (list, tuple)) or len(chunk_spans) == 0:
         return False
+
     return all(isinstance(spans, dict) or not is_span(spans) for spans in chunk_spans)
 
 def parse_chunk_ids(value):
     if isinstance(value, int):
         return {value}
+
     if isinstance(value, (list, tuple, set)):
         return {int(v) for v in value}
+
     return {int(part) for part in re.findall(r'\d+', str(value))}
 
 def accepts_is_closing(fn: Callable) -> bool:
@@ -78,7 +77,7 @@ and wrap the final answer in <answer>...</answer>."""
 # streaming tag parser
 
 class TagParser(HTMLParser):
-    """streaming html/xml tag parser emitting (is_closing, tag, attrs) as tags complete"""
+    # streaming html/xml parser, emits (is_closing, tag, attrs) once a tag completes
 
     def __init__(self, on_tag: Callable):
         super().__init__()
@@ -86,10 +85,12 @@ class TagParser(HTMLParser):
 
     def _parse_attrs(self, attrs: list[tuple[str, str | None]]) -> dict[str, str]:
         attrs_dict = dict()
+
         for k, v in attrs:
             attrs_dict[k] = default(v, k)
             if not exists(v) and not any(a in attrs_dict for a in CHUNK_ATTRS):
                 attrs_dict['chunks'] = k
+
         return attrs_dict
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
@@ -104,18 +105,15 @@ class TagParser(HTMLParser):
 # state machine
 
 class TagStateMachine:
-    """
-    streaming state machine over generated text - completed tags dispatch to
-    handlers registered with `on`, which may mutate the machine in any way
-
-        @machine.on('window')
-        def window(machine, attrs):
-            machine.state['window_size'] = int(attrs['size'])
-
-    `state` holds arbitrary per-step modifications for an inference engine.
-    state and active chunks are automatically snapshotted on tag open and
-    restored on tag close.
-    """
+    # streaming state machine over generated text - completed tags dispatch to
+    # handlers registered with `on`, which may mutate the machine in any way
+    #
+    #     @machine.on('window')
+    #     def window(machine, attrs):
+    #         machine.state['window_size'] = int(attrs['size'])
+    #
+    # `state` holds arbitrary per-step modifications for an inference engine,
+    # and active chunks are snapshotted on tag open, restored on tag close
 
     def __init__(self, tokenizer_decode: TokenizerDecode | None = None):
         self.tokenizer_decode = default(tokenizer_decode, default_decode_fn)
@@ -133,9 +131,7 @@ class TagStateMachine:
         )
 
     def _restore(self, snapshot):
-        state, chunks = snapshot
-        self.state = state
-        self.active_chunks = chunks
+        self.state, self.active_chunks = snapshot
 
     def step(self, token: int | Tensor | str | Sequence):
         tokens, _ = tree_flatten_with_inverse(tree_map_tensor(
@@ -145,11 +141,12 @@ class TagStateMachine:
 
         for one_token in tokens:
             decoded = self.tokenizer_decode(one_token) if isinstance(one_token, int) else str(one_token)
+
             if exists(decoded):
                 self.parser.feed(decoded)
 
     def on(self, tag: str, fn: Callable | None = None):
-        """handler signature: fn(machine, attrs) or fn(machine, attrs, is_closing)"""
+        # handler signature - fn(machine, attrs) or fn(machine, attrs, is_closing)
 
         def register(fn):
             self.handlers[tag.lower()] = fn
@@ -161,23 +158,32 @@ class TagStateMachine:
         handler = self.handlers.get(tag)
 
         if is_closing:
+            # unwind to the snapshot saved when the matching tag opened
+
             for i in reversed(range(len(self.stack))):
                 saved_tag, snapshot = self.stack[i]
-                if saved_tag == tag:
-                    self._restore(snapshot)
-                    self.stack.pop(i)
-                    break
+
+                if saved_tag != tag:
+                    continue
+
+                self._restore(snapshot)
+                self.stack.pop(i)
+                break
 
             if exists(handler) and accepts_is_closing(handler):
                 handler(self, attrs, is_closing)
-        else:
-            self.stack.append((tag, self._snapshot()))
 
-            if exists(handler):
-                if accepts_is_closing(handler):
-                    handler(self, attrs, False)
-                else:
-                    handler(self, attrs)
+            return
+
+        self.stack.append((tag, self._snapshot()))
+
+        if not exists(handler):
+            return
+
+        if accepts_is_closing(handler):
+            handler(self, attrs, False)
+        else:
+            handler(self, attrs)
 
 # declarative attention mode handlers
 
@@ -194,23 +200,21 @@ def handle_local(machine, attrs):
 # main class
 
 class DeclarativeAttention(TagStateMachine):
-    """
-    declarative attention - Ho et al., 2026
-
-    the model declares which context chunks it needs in its output stream and
-    the state machine derives the attention mask per decode step, so the engine
-    reads fewer KV blocks while the full KV cache stays resident
-
-        - <global>                    all chunks visible (default)
-        - <focus magic_chunks="K,M">  only the named chunks visible
-        - <local>                     no chunks visible
-
-    only chunks are masked, so the scaffold and the response so far stay
-    attended in every mode, provided the chunk spans exclude the scaffold
-
-    custom protocols subclass and override `instructions`, then register their
-    own tags with `on`
-    """
+    # declarative attention - Ho et al., 2026
+    #
+    # the model declares which context chunks it needs in its output stream and
+    # the state machine derives the attention mask per decode step, so the
+    # engine reads fewer KV blocks while the full KV cache stays resident
+    #
+    #     - <global>                    all chunks visible (default)
+    #     - <focus magic_chunks="K,M">  only the named chunks visible
+    #     - <local>                     no chunks visible
+    #
+    # only chunks are masked, so the scaffold and the response so far stay
+    # attended in every mode, provided the chunk spans exclude the scaffold
+    #
+    # custom protocols subclass and override `instructions`, then register
+    # their own tags with `on`
 
     instructions = DEFAULT_INSTRUCTIONS
 
@@ -243,7 +247,8 @@ class DeclarativeAttention(TagStateMachine):
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         template: str | jinja2.Template | None = None
     ):
-        """builds the prompt instructing the model to use this machine's protocol"""
+        # builds a prompt instructing the model to use this machine's protocol
+
         return format_declarative_prompt(
             question,
             context,
@@ -257,6 +262,7 @@ class DeclarativeAttention(TagStateMachine):
     def mode(self):
         if self.active_chunks == self.all_chunks:
             return 'global'
+
         return 'focus' if self.active_chunks else 'local'
 
     @property
@@ -272,7 +278,8 @@ class DeclarativeAttention(TagStateMachine):
         return self.mode == 'local'
 
     def get_mask(self, total_len: int, device = None) -> Tensor:
-        """1d boolean mask over KV positions, True = attended"""
+        # 1d boolean mask over KV positions - True = attended
+
         mask = torch.ones(total_len, dtype = torch.bool, device = device)
 
         if self.is_global:
@@ -285,10 +292,9 @@ class DeclarativeAttention(TagStateMachine):
         return mask
 
     def get_block_mask(self, total_len: int, device = None) -> Tensor:
-        """
-        block-aligned mask - a block is kept if any of its tokens is attended,
-        rounding kept spans outward so no declared token is ever dropped
-        """
+        # block-aligned mask - a block is kept if any of its tokens is attended,
+        # rounding kept spans outward so no declared token is ever dropped
+
         mask = self.get_mask(total_len, device = device)
 
         pad = -total_len % self.block_size
@@ -308,17 +314,19 @@ def derive_declarative_mask(
     tokenizer_decode: TokenizerDecode | None = None,
     device = None
 ) -> Tensor:
-    """
-    derives the 2d causal declarative attention mask from a full sequence by
-    replaying the tokens through the state machine - returns (seq, seq), or
-    (batch, 1, seq, seq) if batched
+    # derives the 2d causal declarative mask from a full sequence by replaying
+    # the tokens through the state machine - returns (seq, seq), or
+    # (batch, 1, seq, seq) if batched
+    #
+    # only generated tokens drive the machine, so pass `prompt_len` when the
+    # prompt itself mentions tags
 
-    only generated tokens drive the state machine, so pass `prompt_len` when
-    the prompt itself mentions tags
-    """
     device = default(device, tokens.device)
     batched = tokens.ndim == 2
-    tokens, _ = pack_with_inverse([tokens], '* n')
+
+    if not batched:
+        tokens = tokens[None]
+
     batch, seq_len = tokens.shape
 
     if is_batched_spans(chunk_spans):
@@ -329,8 +337,8 @@ def derive_declarative_mask(
 
     masks = []
 
-    for b in range(batch):
-        machine = DeclarativeAttention(batch_spans[b], tokenizer_decode = tokenizer_decode)
+    for b, spans in enumerate(batch_spans):
+        machine = DeclarativeAttention(spans, tokenizer_decode = tokenizer_decode)
         mask = torch.zeros((seq_len, seq_len), dtype = torch.bool, device = device)
 
         for i in range(seq_len):
@@ -343,7 +351,11 @@ def derive_declarative_mask(
         masks.append(mask)
 
     out = torch.stack(masks, dim = 0)
-    return rearrange(out, 'b i j -> b 1 i j') if batched else out[0]
+
+    if not batched:
+        return out[0]
+
+    return rearrange(out, 'b i j -> b 1 i j')
 
 # context segmentation (Ho et al., 2026, Appendix F)
 
@@ -358,11 +370,13 @@ SPLIT_PATTERNS = (
 def count_tokens(text, tokenizer_encode = None):
     if exists(tokenizer_encode):
         return len(tokenizer_encode(text))
+
     return max(1, len(text) // 4)
 
 def split_after(text, pattern):
     ends = [match.end() for match in re.finditer(pattern, text)]
     bounds = [0, *ends, len(text)]
+
     return [text[start:end] for start, end in zip(bounds, bounds[1:]) if start < end]
 
 def split_unit(text, tokenizer_encode, max_tokens):
@@ -378,13 +392,12 @@ def split_unit(text, tokenizer_encode, max_tokens):
     return [text]
 
 def segment_context(text, tokenizer_encode = None, target_tokens = 2048, max_tokens = 2560):
-    """
-    splits a context into addressable segments - a unit is split only if it
-    exceeds `max_tokens`, at the coarsest available boundary, and adjacent units
-    are merged up to `target_tokens`
+    # splits a context into addressable segments - a unit is split only if it
+    # exceeds `max_tokens`, at the coarsest available boundary, and adjacent
+    # units are merged up to `target_tokens`
+    #
+    # segments form a lossless partition - concatenating them reproduces `text`
 
-    segments form a lossless partition: concatenating them reproduces `text`
-    """
     if len(text.strip()) == 0:
         return ['<empty_context>']
 
@@ -397,9 +410,10 @@ def segment_context(text, tokenizer_encode = None, target_tokens = 2048, max_tok
         if current and current_tokens + unit_tokens > target_tokens:
             segments.append(current)
             current, current_tokens = unit, unit_tokens
-        else:
-            current += unit
-            current_tokens += unit_tokens
+            continue
+
+        current += unit
+        current_tokens += unit_tokens
 
     if current:
         segments.append(current)
@@ -435,24 +449,24 @@ def format_declarative_prompt(
     instructions: str = DEFAULT_INSTRUCTIONS,
     template: str | jinja2.Template | None = None
 ):
-    """
-    builds the declarative attention prompt, delivering the context as numbered
-    magic chunks, and returns the chunk spans the state machine needs
+    # builds the declarative attention prompt, delivering the context as
+    # numbered magic chunks, and returns the chunk spans the state machine needs
+    #
+    # `context` may be a raw string, segmented with `segment_context`, or a
+    # sequence of pre-made chunks - with a `tokenizer_encode`, the prompt is
+    # token ids and spans are token indices, otherwise text with char offsets
 
-    `context` may be a raw string, segmented with `segment_context`, or a
-    sequence of pre-made chunks - with a `tokenizer_encode`, the prompt is token
-    ids and spans are token indices, otherwise text with character offsets
-    """
     chunks = segment_context(context, tokenizer_encode) if isinstance(context, str) else list(context)
 
-    if exists(tokenizer_encode):
-        def encode(text):
-            tokens = tokenizer_encode(text)
-            return tokens.tolist() if isinstance(tokens, Tensor) else list(tokens)
-    else:
-        encode = identity
+    def encode(text):
+        if not exists(tokenizer_encode):
+            return text
+
+        tokens = tokenizer_encode(text)
+        return tokens.tolist() if isinstance(tokens, Tensor) else list(tokens)
 
     prompt_template = default(template, DEFAULT_PROMPT_TEMPLATE)
+
     if isinstance(prompt_template, str):
         prompt_template = jinja2.Template(prompt_template, trim_blocks = True, lstrip_blocks = True)
 
@@ -467,18 +481,19 @@ def format_declarative_prompt(
 
     prompt = [] if exists(tokenizer_encode) else ''
     chunk_spans = dict()
-    current_idx = 1
 
     for part in rendered.split(MARKER_START):
-        if MARKER_END in part:
-            chunk_content, rest = part.split(MARKER_END, 1)
-            start = len(prompt)
-            prompt += encode(chunk_content)
-            chunk_spans[current_idx] = (start, len(prompt))
-            current_idx += 1
-            prompt += encode(rest)
-        else:
+        if MARKER_END not in part:
             prompt += encode(part)
+            continue
+
+        chunk_content, rest = part.split(MARKER_END, 1)
+
+        start = len(prompt)
+        prompt += encode(chunk_content)
+        chunk_spans[len(chunk_spans) + 1] = (start, len(prompt))
+
+        prompt += encode(rest)
 
     return prompt, chunk_spans
 
@@ -496,16 +511,15 @@ def extract_chunk_spans(
     tokenizer_encode: TokenizerEncode | None = None,
     strip: bool = True
 ) -> dict[int, Span] | list[dict[int, Span]]:
-    """
-    extracts chunk spans (char or token offsets) from text with delimited chunks
+    # extracts chunk spans (char or token offsets) from text with delimited chunks
+    #
+    # supports:
+    # - a single string, or a list of strings for batched prompts
+    # - xml tags - <chunk id="1">...</chunk> or <magic_chunk id="1">...</magic_chunk>
+    # - paper format - Magic Chunk 1:\n...
+    # - custom tag - tag="document" -> <document id="1">...</document>
+    # - custom regex pattern with id and content groups
 
-    supports:
-    - single string or list of strings for batched prompts
-    - xml tags: <chunk id="1">...</chunk> or <magic_chunk id="1">...</magic_chunk>
-    - paper format: Magic Chunk 1:\\n...
-    - custom tag: tag="document" -> <document id="1">...</document>
-    - custom regex pattern with id and content groups
-    """
     if isinstance(text, (list, tuple)):
         return [
             extract_chunk_spans(
@@ -528,13 +542,16 @@ def extract_chunk_spans(
     spans = dict()
     auto_id = 1
 
-    if exists(tokenizer_encode):
-        def count(s):
-            res = tokenizer_encode(s)
-            return res.shape[0] if isinstance(res, Tensor) else len(res)
+    def count(s):
+        if not exists(tokenizer_encode):
+            return len(s)
+
+        res = tokenizer_encode(s)
+        return res.shape[0] if isinstance(res, Tensor) else len(res)
 
     for pat in patterns:
         matches = list(re.finditer(pat, text, re.DOTALL | re.IGNORECASE))
+
         if not matches:
             continue
 
@@ -550,8 +567,8 @@ def extract_chunk_spans(
                 char_start += len(raw) - len(raw.lstrip())
                 char_end -= len(raw) - len(raw.rstrip())
 
-            start = count(text[:char_start]) if exists(tokenizer_encode) else char_start
-            end = count(text[:char_end]) if exists(tokenizer_encode) else char_end
+            start = count(text[:char_start])
+            end = count(text[:char_end])
 
             spans[chunk_id] = (start, end)
 

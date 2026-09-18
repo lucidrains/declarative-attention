@@ -2,16 +2,17 @@
 
 ## Declarative Attention - Pytorch (wip)
 
-Implementation of [Language Models Can Control Their Own Attention](https://arxiv.org/abs/2609.02737), from Namgyu Ho et al. of KAIST AI.
+Implementation of <a href="https://arxiv.org/abs/2609.02737">Language Models Can Control Their Own Attention</a>, from Namgyu Ho et al. of KAIST AI
 
-Normally, language models attend to the entire prompt KV cache at every decoding step, even when reasoning only requires a fraction of the text.
+Normally, a language model attends to the entire prompt KV cache at every decoding step, even when the reasoning only needs a fraction of the text.
 
-**Declarative Attention** allows the model to declare what it needs to attend to in its output stream:
-- `<global>`: all chunks visible (default)
-- `<focus magic_chunks="1, 3">`: only the selected chunks visible
-- `<local>`: no chunks visible (the model reasons using only its own thoughts and instructions)
+**Declarative Attention** lets the model declare what it needs to attend to in its output stream
 
-The full KV cache stays in memory, so masking is completely reversible with zero cache eviction.
+- `<global>` - all chunks visible (default)
+- `<focus magic_chunks="1, 3">` - only the selected chunks visible
+- `<local>` - no chunks visible, the model reasons using only its own thoughts and instructions
+
+The full KV cache stays in memory, so masking is completely reversible, with zero cache eviction
 
 ## Install
 
@@ -37,6 +38,7 @@ The annual shareholder meeting was held in Chicago in 2011.
 """
 
 # extract chunk spans using your tokenizer (or character offsets if omitted)
+
 chunk_spans = extract_chunk_spans(prompt, tokenizer_encode = tokenizer.encode)
 
 da = DeclarativeAttention(
@@ -53,7 +55,7 @@ da.step('<focus magic_chunks="2">')
 assert da.mode == 'focus'
 assert da.active_chunks == {2}
 
-mask = da.get_mask(total_len = 8192)        # 1d boolean mask over KV cache (True = attended)
+mask = da.get_mask(total_len = 8192)        # 1d boolean mask over the KV cache (True = attended)
 kept = da.get_kept_blocks(total_len = 8192) # block indices for paged attention (vLLM)
 
 # 2. switch to local mode to reason without reading any context chunks
@@ -69,25 +71,25 @@ assert da.active_chunks == set()
 mask = da.get_mask(total_len = 8192)
 kept = da.get_kept_blocks(total_len = 8192)
 
-# 3. closing the tag restores previous state
+# 3. closing the tag restores the previous state
 
 da.step('</local>')
 
 assert da.mode == 'focus'
 assert da.active_chunks == {2}
 
-# closing focus or switching to <global> returns to all chunks visible
+# closing focus, or switching to <global>, returns to all chunks visible
 
 da.step('</focus>')
 
 assert da.mode == 'global'
 ```
 
-The state machine tracks active chunks and unwinds nested tags on close. The `mode` (`global` / `focus` / `local`) is derived automatically from active chunks.
+The state machine tracks active chunks and unwinds nested tags on close. The `mode` (`global` / `focus` / `local`) is derived automatically from the active chunks.
 
 ## Prompt Construction
 
-The context is split into `~2048`-token chunks ("magic chunks") and presented to the model with that label. The segmenter splits only text that exceeds the limit, breaking cleanly (paragraphs, sentences, words) without losing any characters:
+The context is split into `~2048`-token chunks ("magic chunks") and presented to the model with that label. The segmenter splits only text that exceeds the limit, breaking cleanly (paragraphs, sentences, words) without losing any characters
 
 ```python
 from declarative_attention import segment_context, format_declarative_prompt
@@ -101,11 +103,11 @@ prompt, chunk_spans = format_declarative_prompt(
 )
 ```
 
-`format_declarative_prompt` returns token ids and token-index spans when given `tokenizer_encode`, or text and character offsets when omitted.
+`format_declarative_prompt` returns token ids and token-index spans when given a `tokenizer_encode`, or text and character offsets when omitted.
 
 ## Custom State Machines
 
-Any tag can modify any part of the decode step. Active chunks and `da.state` are automatically saved when a tag opens and restored when it closes:
+Any tag can modify any part of the decode step. Active chunks and `da.state` are automatically saved when a tag opens and restored when it closes
 
 ```python
 from declarative_attention import DeclarativeAttention, parse_chunk_ids
@@ -113,29 +115,33 @@ from declarative_attention import DeclarativeAttention, parse_chunk_ids
 da = DeclarativeAttention(chunk_spans, tokenizer_decode = tokenizer.decode)
 
 # 1. compare multiple chunks together
+
 @da.on('compare')
 def compare(da, attrs):
     da.active_chunks = parse_chunk_ids(attrs['chunks'])
 
-# 2. transcribe verbatim: isolate one chunk and decode greedily
+# 2. transcribe verbatim - isolate one chunk and decode greedily
+
 @da.on('verbatim')
 def verbatim(da, attrs):
     da.active_chunks = {int(attrs['chunk'])}
     da.state['temperature'] = 0.
 
-# 3. brainstorm: think locally without reading context, with higher temperature
+# 3. brainstorm - think locally without reading context, with higher temperature
+
 @da.on('brainstorm')
 def brainstorm(da, attrs):
     da.active_chunks = set()
     da.state['temperature'] = 1.5
 
 # 4. force MoE routing to specific experts
+
 @da.on('expert')
 def expert(da, attrs):
     da.state['force_expert_ids'] = parse_chunk_ids(attrs['ids'])
 ```
 
-The model can now declare:
+The model can now declare
 
 ```xml
 <compare chunks="1, 3">
@@ -151,7 +157,7 @@ Synthesizing new hypotheses without context distractions...
 </brainstorm>
 ```
 
-The model has to be told about these tags, so pass matching `instructions` when building the prompt:
+The model has to be told about these tags, so pass matching `instructions` when building the prompt
 
 ```python
 prompt, chunk_spans = format_declarative_prompt(
@@ -168,7 +174,7 @@ For a state machine that is not about attention at all, subclass `TagStateMachin
 
 ## vLLM
 
-vLLM reads whole KV blocks, so the token mask is rounded outward to block boundaries and each request's block table is rewritten to contain only the kept blocks. The attention kernel simply reads less, with no kernel modifications.
+vLLM reads whole KV blocks, so the token mask is rounded outward to block boundaries and each request's block table is rewritten to contain only the kept blocks. The attention kernel simply reads less, with no kernel modifications
 
 ```python
 from declarative_attention import DeclarativeVLLMHook
@@ -177,15 +183,17 @@ hook = DeclarativeVLLMHook(block_size = 16, tokenizer_decode = tokenizer.decode)
 hook.register_request(request_id, chunk_spans)
 
 # on every sampled token
+
 hook.step(request_id, token)
 
 # hook onto the attention metadata builder
+
 block_tables, seq_lens = hook(block_tables, seq_lens, request_ids)
 ```
 
 ## With `x-transformers`
 
-Training derives the 2d causal DA mask from the full sequence. Generation streams sampled tokens through the state machine and passes the per-step KV mask to the model, so attention reads less as the model changes modes.
+Training derives the 2d causal DA mask from the full sequence. Generation streams sampled tokens through the state machine and passes the per-step KV mask to the model, so attention reads less as the model changes modes
 
 ```python
 import torch
@@ -201,11 +209,13 @@ net = TransformerWrapper(
 wrapper = DeclarativeAttentionWrapper(net, tokenizer_decode = tokenizer.decode)
 
 # 1. training, with the 2d causal declarative attention mask
+
 x = torch.randint(0, 256, (2, 512))
 loss = wrapper(x, chunk_spans = chunk_spans, prompt_len = 64)
 loss.backward()
 
 # 2. generation, with dynamic per-step KV masking
+
 out = wrapper.generate(prompt, seq_len = 256, chunk_spans = chunk_spans)
 ```
 
