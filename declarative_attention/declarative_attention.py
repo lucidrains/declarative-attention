@@ -102,6 +102,11 @@ class TagParser(HTMLParser):
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]):
         self.handle_starttag(tag, attrs)
 
+# exceptions
+
+class StateMachineViolationError(Exception):
+    pass
+
 # state machine
 
 class TagStateMachine:
@@ -115,8 +120,13 @@ class TagStateMachine:
     # `state` holds arbitrary per-step modifications for an inference engine,
     # and active chunks are snapshotted on tag open, restored on tag close
 
-    def __init__(self, tokenizer_decode: TokenizerDecode | None = None):
+    def __init__(
+        self,
+        tokenizer_decode: TokenizerDecode | None = None,
+        strict: bool = False
+    ):
         self.tokenizer_decode = default(tokenizer_decode, default_decode_fn)
+        self.strict = strict
         self.handlers = dict()
         self.state = dict()
         self.stack = []
@@ -157,7 +167,22 @@ class TagStateMachine:
     def _on_tag(self, is_closing, tag, attrs):
         handler = self.handlers.get(tag)
 
+        if not exists(handler):
+            return
+
         if is_closing:
+            if self.strict:
+                if len(self.stack) == 0:
+                    raise StateMachineViolationError(
+                        f"closing tag </{tag}> detected but no tags are open"
+                    )
+
+                open_tag, _ = self.stack[-1]
+                if open_tag != tag:
+                    raise StateMachineViolationError(
+                        f"closing tag </{tag}> does not match open tag <{open_tag}>"
+                    )
+
             # unwind to the snapshot saved when the matching tag opened
 
             for i in reversed(range(len(self.stack))):
@@ -170,15 +195,18 @@ class TagStateMachine:
                 self.stack.pop(i)
                 break
 
-            if exists(handler) and accepts_is_closing(handler):
+            if accepts_is_closing(handler):
                 handler(self, attrs, is_closing)
 
             return
 
-        self.stack.append((tag, self._snapshot()))
+        if self.strict and len(self.stack) > 0:
+            open_tag, _ = self.stack[-1]
+            raise StateMachineViolationError(
+                f"tag <{tag}> opened before <{open_tag}> was closed"
+            )
 
-        if not exists(handler):
-            return
+        self.stack.append((tag, self._snapshot()))
 
         if accepts_is_closing(handler):
             handler(self, attrs, False)
@@ -220,23 +248,35 @@ class DeclarativeAttention(TagStateMachine):
 
     def __init__(
         self,
-        chunk_spans: ChunkSpans,
+        chunk_spans: ChunkSpans | None = None,
         tokenizer_decode: TokenizerDecode | None = None,
+        instructions: str | None = None,
+        strict: bool = False,
         block_size: int = 16
     ):
-        super().__init__(tokenizer_decode)
+        super().__init__(tokenizer_decode, strict = strict)
+
+        self.instructions = default(instructions, self.instructions)
+        self.block_size = block_size
+        self.set_chunk_spans(chunk_spans)
+
+        self.on('global', handle_global)
+        self.on('focus', handle_focus)
+        self.on('local', handle_local)
+
+    def set_chunk_spans(self, chunk_spans: ChunkSpans | None):
+        if not exists(chunk_spans):
+            self.chunk_spans = dict()
+            self.all_chunks = set()
+            self.active_chunks = set()
+            return
 
         if isinstance(chunk_spans, (list, tuple)):
             chunk_spans = {i + 1: tuple(span) for i, span in enumerate(chunk_spans)}
 
         self.chunk_spans = chunk_spans
         self.all_chunks = set(chunk_spans)
-        self.block_size = block_size
         self.active_chunks = set(self.all_chunks)
-
-        self.on('global', handle_global)
-        self.on('focus', handle_focus)
-        self.on('local', handle_local)
 
     @classmethod
     def format_prompt(
@@ -245,6 +285,7 @@ class DeclarativeAttention(TagStateMachine):
         context: str | Sequence[str],
         tokenizer_encode: TokenizerEncode | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        instructions: str | None = None,
         template: str | jinja2.Template | None = None
     ):
         # builds a prompt instructing the model to use this machine's protocol
@@ -254,7 +295,7 @@ class DeclarativeAttention(TagStateMachine):
             context,
             tokenizer_encode = tokenizer_encode,
             system_prompt = system_prompt,
-            instructions = cls.instructions,
+            instructions = default(instructions, cls.instructions),
             template = template
         )
 

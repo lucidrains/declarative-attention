@@ -7,7 +7,8 @@ from declarative_attention.declarative_attention import (
     DeclarativeAttention,
     ChunkSpans,
     TokenizerDecode,
-    exists
+    exists,
+    default
 )
 
 class DeclarativeVLLMHook:
@@ -25,16 +26,24 @@ class DeclarativeVLLMHook:
     def __init__(
         self,
         block_size: int = 16,
-        tokenizer_decode: TokenizerDecode | None = None
+        tokenizer_decode: TokenizerDecode | None = None,
+        strict: bool = False
     ):
         self.block_size = block_size
         self.tokenizer_decode = tokenizer_decode
+        self.strict = strict
         self.machines: dict[str, DeclarativeAttention] = dict()
 
-    def register_request(self, request_id: str, chunk_spans: ChunkSpans) -> DeclarativeAttention:
+    def register_request(
+        self,
+        request_id: str,
+        chunk_spans: ChunkSpans,
+        strict: bool | None = None
+    ) -> DeclarativeAttention:
         machine = DeclarativeAttention(
             chunk_spans,
             tokenizer_decode = self.tokenizer_decode,
+            strict = default(strict, self.strict),
             block_size = self.block_size
         )
         self.machines[request_id] = machine

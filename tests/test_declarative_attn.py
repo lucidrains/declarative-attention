@@ -1,7 +1,9 @@
+import pytest
 import torch
 
 from declarative_attention import (
     DeclarativeAttention,
+    StateMachineViolationError,
     derive_declarative_mask,
     extract_chunk_spans,
     format_declarative_prompt,
@@ -494,3 +496,39 @@ def test_derive_declarative_mask_single_vs_batched_parity():
     assert batched_mask.shape == (2, 1, len(seq1), len(seq1))
     assert torch.equal(batched_mask[0, 0], mask1)
     assert torch.equal(batched_mask[1, 0], mask2)
+
+# strict state machine violation detection
+
+def test_state_machine_strict_detects_unclosed_tag_violation():
+    da = DeclarativeAttention({1: (0, 10), 2: (10, 20)}, strict = True)
+
+    da.step('<focus magic_chunks="1">')
+    assert da.is_focus
+
+    # opening <local> while <focus> is unclosed raises StateMachineViolationError
+    with pytest.raises(StateMachineViolationError, match = "tag <local> opened before <focus> was closed"):
+        da.step('<local>')
+
+def test_state_machine_strict_false_allows_continuing():
+    da = DeclarativeAttention({1: (0, 10), 2: (10, 20)}, strict = False)
+
+    da.step('<focus magic_chunks="1">')
+    assert da.is_focus
+
+    # default allows continuing without error
+    da.step('<local>')
+    assert da.is_local
+
+def test_state_machine_strict_unmatched_closing_tag():
+    da = DeclarativeAttention({1: (0, 10)}, strict = True)
+
+    with pytest.raises(StateMachineViolationError, match = "closing tag </local> detected but no tags are open"):
+        da.step('</local>')
+
+def test_state_machine_strict_mismatched_closing_tag():
+    da = DeclarativeAttention({1: (0, 10)}, strict = True)
+
+    da.step('<focus magic_chunks="1">')
+
+    with pytest.raises(StateMachineViolationError, match = "closing tag </local> does not match open tag <focus>"):
+        da.step('</local>')

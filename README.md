@@ -41,48 +41,48 @@ The annual shareholder meeting was held in Chicago in 2011.
 
 chunk_spans = extract_chunk_spans(prompt, tokenizer_encode = tokenizer.encode)
 
-da = DeclarativeAttention(
+declare_attn = DeclarativeAttention(
     chunk_spans = chunk_spans,
     tokenizer_decode = tokenizer.decode
 )
 
-assert da.mode == 'global' # all chunks visible by default
+assert declare_attn.mode == 'global' # all chunks visible by default
 
 # 1. focus on specific chunks while reading facts
 
-da.step('<focus magic_chunks="2">')
+declare_attn.step('<focus magic_chunks="2">')
 
-assert da.mode == 'focus'
-assert da.active_chunks == {2}
+assert declare_attn.mode == 'focus'
+assert declare_attn.active_chunks == {2}
 
-mask = da.get_mask(total_len = 8192)        # 1d boolean mask over the KV cache (True = attended)
-kept = da.get_kept_blocks(total_len = 8192) # block indices for paged attention (vLLM)
+mask = declare_attn.get_mask(total_len = 8192)        # 1d boolean mask over the KV cache (True = attended)
+kept = declare_attn.get_kept_blocks(total_len = 8192) # block indices for paged attention (vLLM)
 
 # 2. switch to local mode to reason without reading any context chunks
 
-da.step('<local>')
+declare_attn.step('<local>')
 
-assert da.mode == 'local'
-assert da.active_chunks == set()
+assert declare_attn.mode == 'local'
+assert declare_attn.active_chunks == set()
 
 # in local mode, all context chunks are masked out
 # only the instructions and the model's own response so far stay attended
 
-mask = da.get_mask(total_len = 8192)
-kept = da.get_kept_blocks(total_len = 8192)
+mask = declare_attn.get_mask(total_len = 8192)
+kept = declare_attn.get_kept_blocks(total_len = 8192)
 
 # 3. closing the tag restores the previous state
 
-da.step('</local>')
+declare_attn.step('</local>')
 
-assert da.mode == 'focus'
-assert da.active_chunks == {2}
+assert declare_attn.mode == 'focus'
+assert declare_attn.active_chunks == {2}
 
 # closing focus, or switching to <global>, returns to all chunks visible
 
-da.step('</focus>')
+declare_attn.step('</focus>')
 
-assert da.mode == 'global'
+assert declare_attn.mode == 'global'
 ```
 
 The state machine tracks active chunks and unwinds nested tags on close. The `mode` (`global` / `focus` / `local`) is derived automatically from the active chunks.
@@ -107,38 +107,38 @@ prompt, chunk_spans = format_declarative_prompt(
 
 ## Custom State Machines
 
-Any tag can modify any part of the decode step. Active chunks and `da.state` are automatically saved when a tag opens and restored when it closes
+Any tag can modify any part of the decode step. Active chunks and `declare_attn.state` are automatically saved when a tag opens and restored when it closes
 
 ```python
 from declarative_attention import DeclarativeAttention, parse_chunk_ids
 
-da = DeclarativeAttention(chunk_spans, tokenizer_decode = tokenizer.decode)
+declare_attn = DeclarativeAttention(chunk_spans, tokenizer_decode = tokenizer.decode)
 
 # 1. compare multiple chunks together
 
-@da.on('compare')
-def compare(da, attrs):
-    da.active_chunks = parse_chunk_ids(attrs['chunks'])
+@declare_attn.on('compare')
+def compare(declare_attn, attrs):
+    declare_attn.active_chunks = parse_chunk_ids(attrs['chunks'])
 
 # 2. transcribe verbatim - isolate one chunk and decode greedily
 
-@da.on('verbatim')
-def verbatim(da, attrs):
-    da.active_chunks = {int(attrs['chunk'])}
-    da.state['temperature'] = 0.
+@declare_attn.on('verbatim')
+def verbatim(declare_attn, attrs):
+    declare_attn.active_chunks = {int(attrs['chunk'])}
+    declare_attn.state['temperature'] = 0.
 
 # 3. brainstorm - think locally without reading context, with higher temperature
 
-@da.on('brainstorm')
-def brainstorm(da, attrs):
-    da.active_chunks = set()
-    da.state['temperature'] = 1.5
+@declare_attn.on('brainstorm')
+def brainstorm(declare_attn, attrs):
+    declare_attn.active_chunks = set()
+    declare_attn.state['temperature'] = 1.5
 
 # 4. force MoE routing to specific experts
 
-@da.on('expert')
-def expert(da, attrs):
-    da.state['force_expert_ids'] = parse_chunk_ids(attrs['ids'])
+@declare_attn.on('expert')
+def expert(declare_attn, attrs):
+    declare_attn.state['force_expert_ids'] = parse_chunk_ids(attrs['ids'])
 ```
 
 The model can now declare

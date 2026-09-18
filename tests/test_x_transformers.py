@@ -1,7 +1,14 @@
+import pytest
 import torch
 from x_transformers import TransformerWrapper, Decoder
 
-from declarative_attention import DeclarativeAttention, DeclarativeAttentionWrapper
+from declarative_attention import (
+    DeclarativeAttention,
+    DeclarativeAttentionWrapper,
+    StateMachineViolationError,
+    format_declarative_prompt,
+    parse_chunk_ids
+)
 
 def decode_fn(token):
     return chr(token) if 0 <= token < 128 else ''
@@ -173,3 +180,105 @@ def test_generation_dynamic_modes_two_vs_one_parity():
 
     assert torch.equal(out_batch[0], out1[0])
     assert torch.equal(out_batch[1], out2[0])
+
+def test_custom_state_machine_instructing_prompt_e2e():
+    torch.manual_seed(42)
+    encode_fn = lambda s: [ord(c) for c in s]
+    decode_fn = lambda t: chr(t) if 0 <= t < 128 else ''
+
+    net = TransformerWrapper(
+        num_tokens = 256,
+        max_seq_len = 512,
+        attn_layers = Decoder(dim = 32, depth = 2, heads = 2)
+    )
+
+    wrapper = DeclarativeAttentionWrapper(
+        net,
+        tokenizer_decode = decode_fn,
+        tokenizer_encode = encode_fn
+    )
+
+    custom_instructions = """Answer using the magic chunks.
+- <compare chunks="K,M">: compare chunks
+- <brainstorm>: brainstorm locally"""
+
+    prompt, chunk_spans = format_declarative_prompt(
+        question = "What is the answer?",
+        context = "Acme was founded in 2003.",
+        instructions = custom_instructions,
+        tokenizer_encode = encode_fn
+    )
+
+    da = DeclarativeAttention(chunk_spans, tokenizer_decode = decode_fn)
+
+    @da.on('compare')
+    def compare(machine, attrs):
+        machine.active_chunks = parse_chunk_ids(attrs['chunks'])
+
+    @da.on('brainstorm')
+    def brainstorm(machine, attrs):
+        machine.active_chunks = set()
+        machine.state['temperature'] = 1.5
+
+    # pass both prompt (list of token ints) and custom state machine to wrapper.generate
+    out = wrapper.generate(prompt, seq_len = 16, state_machine = da)
+    assert out.shape == (1, 16)
+
+def test_generation_strict_during_generate_raises():
+    torch.manual_seed(42)
+    vocab = {100: '<focus magic_chunks="1">', 101: '<local>'}
+    decode_fn = lambda t: vocab.get(t, chr(t) if 0 <= t < 128 else '')
+
+    wrapper = make_wrapper(dim = 32, depth = 2, heads = 2)
+    wrapper.tokenizer_decode = decode_fn
+
+    call_count = 0
+    def mock_logit_fn(logits):
+        nonlocal call_count
+        call_count += 1
+        logits = torch.full_like(logits, -float('Inf'))
+        token = 100 if call_count == 1 else 101
+        logits[:, token] = 10.
+        return logits
+
+    da = DeclarativeAttention({1: (0, 1)}, tokenizer_decode = decode_fn, strict = True)
+
+    with pytest.raises(StateMachineViolationError, match = "tag <local> opened before <focus> was closed"):
+        wrapper.generate(
+            torch.tensor([[1, 2]]),
+            seq_len = 5,
+            state_machine = da,
+            logit_fn = mock_logit_fn,
+            temperature = 0.
+        )
+
+def test_generation_strict_false_during_generate_continues():
+    torch.manual_seed(42)
+    vocab = {100: '<focus magic_chunks="1">', 101: '<local>'}
+    decode_fn = lambda t: vocab.get(t, chr(t) if 0 <= t < 128 else '')
+
+    wrapper = make_wrapper(dim = 32, depth = 2, heads = 2)
+    wrapper.tokenizer_decode = decode_fn
+
+    call_count = 0
+    def mock_logit_fn(logits):
+        nonlocal call_count
+        call_count += 1
+        logits = torch.full_like(logits, -float('Inf'))
+        token = 100 if call_count == 1 else 101
+        logits[:, token] = 10.
+        return logits
+
+    da = DeclarativeAttention({1: (0, 1)}, tokenizer_decode = decode_fn, strict = False)
+
+    # strict=False allows continuing past unclosed tag
+    out = wrapper.generate(
+        torch.tensor([[1, 2]]),
+        seq_len = 3,
+        state_machine = da,
+        logit_fn = mock_logit_fn,
+        temperature = 0.
+    )
+    assert out.shape == (1, 3)
+
+

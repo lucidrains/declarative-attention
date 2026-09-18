@@ -1,4 +1,4 @@
-from __future__ import annotations
+import copy
 from typing import Callable, Sequence
 
 import torch
@@ -16,6 +16,7 @@ from declarative_attention.declarative_attention import (
     DeclarativeAttention,
     ChunkSpans,
     TokenizerDecode,
+    TokenizerEncode,
     derive_declarative_mask,
     is_batched_spans,
     exists,
@@ -69,13 +70,17 @@ class DeclarativeAttentionWrapper(nn.Module):
         net: nn.Module,
         pad_value: int = 0,
         ignore_index: int = -100,
-        tokenizer_decode: TokenizerDecode | None = None
+        tokenizer_decode: TokenizerDecode | None = None,
+        tokenizer_encode: TokenizerEncode | None = None,
+        strict: bool = False
     ):
         super().__init__()
         self.net = net
         self.pad_value = pad_value
         self.ignore_index = ignore_index
         self.tokenizer_decode = tokenizer_decode
+        self.tokenizer_encode = tokenizer_encode
+        self.strict = strict
         self.max_seq_len = net.max_seq_len
 
     def forward(
@@ -108,10 +113,11 @@ class DeclarativeAttentionWrapper(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        prompts: list[Tensor] | Tensor,
+        prompts: Tensor | list[Tensor] | str | list[str] | list[int] | list[list[int]],
         seq_len: int,
         chunk_spans: ChunkSpans | Sequence[ChunkSpans] | None = None,
         state_machine: DeclarativeAttention | Sequence[DeclarativeAttention] | None = None,
+        strict: bool | None = None,
         temperature: float = 1.,
         filter_logits_fn: Callable = top_k,
         filter_kwargs: dict = dict(),
@@ -120,20 +126,55 @@ class DeclarativeAttentionWrapper(nn.Module):
         eos_token: int | None = None,
         **kwargs
     ):
-        if isinstance(prompts, list):
-            prompts = pad_sequence(prompts)
+        if isinstance(prompts, str):
+            assert exists(self.tokenizer_encode), 'tokenizer_encode must be passed to DeclarativeAttentionWrapper to pass string prompts'
+            tokens = self.tokenizer_encode(prompts)
+            prompts = torch.tensor([tokens] if not isinstance(tokens, Tensor) else tokens[None])
+
+        elif isinstance(prompts, list):
+            if len(prompts) == 0:
+                prompts = torch.empty((0, 0), dtype = torch.long)
+            elif all(isinstance(x, int) for x in prompts):
+                prompts = torch.tensor([prompts])
+            elif all(isinstance(x, str) for x in prompts):
+                assert exists(self.tokenizer_encode), 'tokenizer_encode must be passed to DeclarativeAttentionWrapper to pass string prompts'
+                prompts = [torch.tensor(self.tokenizer_encode(p)) for p in prompts]
+                prompts = pad_sequence(prompts, pad_value = self.pad_value)
+            elif all(isinstance(x, (list, tuple)) for x in prompts):
+                prompts = [torch.tensor(p) for p in prompts]
+                prompts = pad_sequence(prompts, pad_value = self.pad_value)
+            elif all(isinstance(x, Tensor) for x in prompts):
+                prompts = pad_sequence(prompts, pad_value = self.pad_value)
+
+        elif isinstance(prompts, Tensor) and prompts.ndim == 1:
+            prompts = prompts[None]
 
         prompts, ps = pack([prompts], '* n')
         batch = prompts.shape[0]
 
         machines = state_machine
 
-        if exists(machines) and not isinstance(machines, (list, tuple)):
-            machines = [machines] * batch
+        if exists(machines):
+            if isinstance(machines, (list, tuple)):
+                assert len(machines) == batch
+                machines = list(machines)
+            else:
+                machines = [copy.deepcopy(machines) for _ in range(batch)] if batch > 1 else [machines]
 
-        if not exists(machines) and exists(chunk_spans):
+            if exists(strict):
+                for machine in machines:
+                    machine.strict = strict
+
+        elif exists(chunk_spans):
             spans = list(chunk_spans) if is_batched_spans(chunk_spans) else [chunk_spans] * batch
-            machines = [DeclarativeAttention(s, tokenizer_decode = self.tokenizer_decode) for s in spans]
+            machines = [
+                DeclarativeAttention(
+                    s,
+                    tokenizer_decode = self.tokenizer_decode,
+                    strict = default(strict, self.strict)
+                )
+                for s in spans
+            ]
 
         out = prompts
         t = prompts.shape[-1]

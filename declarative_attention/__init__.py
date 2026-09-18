@@ -1,6 +1,7 @@
 from declarative_attention.declarative_attention import (
     DeclarativeAttention,
     TagStateMachine,
+    StateMachineViolationError,
     DEFAULT_INSTRUCTIONS,
     DEFAULT_SYSTEM_PROMPT,
     derive_declarative_mask,
