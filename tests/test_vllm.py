@@ -11,19 +11,21 @@ def test_block_table_rewritten_per_mode():
     seq_lens = torch.tensor([170])
 
     # global: every block stays visible
-    new_block_tables, _ = hook(block_tables, seq_lens, ['req'])
+    new_block_tables, new_seq_lens_global = hook(block_tables, seq_lens, ['req'])
     assert new_block_tables[0].tolist() == block_tables[0].tolist()
+    assert new_seq_lens_global[0] == 170
 
-    # focus on chunk 2: sink, chunk 2, question, response
+    # focus on chunk 2: sink (16), chunk 2 (32), question + response (26) = 74 tokens across 5 blocks
     hook.step('req', '<focus magic_chunks="2">')
     new_block_tables, new_seq_lens = hook(block_tables, seq_lens, ['req'])
     assert new_block_tables[0, :5].tolist() == [42, 73, 84, 137, 201]
-    assert new_seq_lens[0] == 5 * 16
+    assert new_seq_lens[0] == 74
 
-    # local: no chunks
+    # local: sink (16) + question and response (26) = 42 tokens across 3 blocks
     hook.step('req', '</focus><local>')
-    new_block_tables, _ = hook(block_tables, seq_lens, ['req'])
+    new_block_tables, new_seq_lens_local = hook(block_tables, seq_lens, ['req'])
     assert new_block_tables[0, :3].tolist() == [42, 137, 201]
+    assert new_seq_lens_local[0] == 42
 
 def test_hook_streams_tag_pieces():
     vocab = {10: '<fo', 11: 'cus magic_chunks="1"', 12: '>'}

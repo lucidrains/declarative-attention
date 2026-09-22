@@ -532,3 +532,61 @@ def test_state_machine_strict_mismatched_closing_tag():
 
     with pytest.raises(StateMachineViolationError, match = "closing tag </local> does not match open tag <focus>"):
         da.step('</local>')
+
+# multi bare attributes
+
+def test_focus_parses_multiple_bare_numbers():
+    da = DeclarativeAttention({1: (0, 10), 2: (10, 20), 3: (20, 30)})
+
+    da.step('<focus 1, 3>')
+    assert da.active_chunks == {1, 3}
+
+    da.step('<focus 1 2>')
+    assert da.active_chunks == {1, 2}
+
+# stack unwind
+
+def test_stack_unwind_discards_enclosed_child_tags():
+    da = DeclarativeAttention({1: (0, 10), 2: (10, 20), 3: (20, 30)})
+
+    @da.on('outer')
+    def handle_outer(m, attrs):
+        m.active_chunks = {1}
+
+    @da.on('inner')
+    def handle_inner(m, attrs):
+        m.active_chunks = {2}
+
+    da.step('<outer>')
+    assert da.active_chunks == {1}
+    assert len(da.stack) == 1
+
+    da.step('<inner>')
+    assert da.active_chunks == {2}
+    assert len(da.stack) == 2
+
+    # closing outer directly must unwind both inner and outer
+    da.step('</outer>')
+    assert da.is_global
+    assert len(da.stack) == 0
+
+# reset and callable alias
+
+def test_declarative_attention_reset():
+    da = DeclarativeAttention({1: (0, 10), 2: (10, 20)})
+    da.step('<focus 1>')
+    assert da.is_focus
+
+    da.reset()
+    assert da.is_global
+    assert da.active_chunks == {1, 2}
+    assert len(da.stack) == 0
+
+def test_declarative_attention_callable_alias():
+    da = DeclarativeAttention({1: (0, 10)})
+    assert torch.equal(da(32), da.get_mask(32))
+
+def test_parse_chunk_ids_nested_and_compound():
+    assert parse_chunk_ids([1, '2, 3', {4}]) == {1, 2, 3, 4}
+    assert parse_chunk_ids(None) == set()
+    assert parse_chunk_ids('') == set()

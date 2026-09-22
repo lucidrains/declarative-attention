@@ -91,6 +91,7 @@ class DeclarativeAttentionWrapper(nn.Module):
         attn_mask: Tensor | None = None,
         **kwargs
     ):
+        x = rearrange(x, 'n -> 1 n') if x.ndim == 1 else x
         inp, target = x[:, :-1], x[:, 1:]
 
         if exists(chunk_spans) and not exists(attn_mask):
@@ -129,7 +130,7 @@ class DeclarativeAttentionWrapper(nn.Module):
         if isinstance(prompts, str):
             assert exists(self.tokenizer_encode), 'tokenizer_encode must be passed to DeclarativeAttentionWrapper to pass string prompts'
             tokens = self.tokenizer_encode(prompts)
-            prompts = torch.tensor([tokens] if not isinstance(tokens, Tensor) else tokens[None])
+            prompts = torch.as_tensor(tokens)[None]
 
         elif isinstance(prompts, list):
             if len(prompts) == 0:
@@ -138,10 +139,10 @@ class DeclarativeAttentionWrapper(nn.Module):
                 prompts = torch.tensor([prompts])
             elif all(isinstance(x, str) for x in prompts):
                 assert exists(self.tokenizer_encode), 'tokenizer_encode must be passed to DeclarativeAttentionWrapper to pass string prompts'
-                prompts = [torch.tensor(self.tokenizer_encode(p)) for p in prompts]
+                prompts = [torch.as_tensor(self.tokenizer_encode(p)) for p in prompts]
                 prompts = pad_sequence(prompts, pad_value = self.pad_value)
             elif all(isinstance(x, (list, tuple)) for x in prompts):
-                prompts = [torch.tensor(p) for p in prompts]
+                prompts = [torch.as_tensor(p) for p in prompts]
                 prompts = pad_sequence(prompts, pad_value = self.pad_value)
             elif all(isinstance(x, Tensor) for x in prompts):
                 prompts = pad_sequence(prompts, pad_value = self.pad_value)
@@ -202,7 +203,7 @@ class DeclarativeAttentionWrapper(nn.Module):
             else:
                 temps = [temperature] * batch
 
-            if step_kwargs.pop('stop', False):
+            if step_kwargs.pop('stop', False) and all(m.state.get('stop', False) for m in machines):
                 break
 
             step_kwargs.pop('temperature', None)

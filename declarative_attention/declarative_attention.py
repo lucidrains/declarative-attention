@@ -11,11 +11,7 @@ import torch
 from torch import Tensor
 from einops import rearrange, reduce
 
-from torch_einops_utils import (
-    pad_right_at_dim,
-    tree_flatten_with_inverse,
-    tree_map_tensor
-)
+from torch_einops_utils import pad_right_at_dim
 
 # helpers
 
@@ -38,18 +34,24 @@ def is_batched_spans(chunk_spans):
     return all(isinstance(spans, dict) or not is_span(spans) for spans in chunk_spans)
 
 def parse_chunk_ids(value):
+    if not exists(value):
+        return set()
+
     if isinstance(value, int):
         return {value}
 
     if isinstance(value, (list, tuple, set)):
-        return {int(v) for v in value}
+        ids = set()
+        for v in value:
+            ids.update(parse_chunk_ids(v))
+        return ids
 
     return {int(part) for part in re.findall(r'\d+', str(value))}
 
 def accepts_is_closing(fn: Callable) -> bool:
     try:
-        sig = inspect.signature(fn)
-        return len(sig.parameters) >= 3 or any(p.kind == p.VAR_POSITIONAL for p in sig.parameters.values())
+        inspect.signature(fn).bind(None, None, None)
+        return True
     except (ValueError, TypeError):
         return False
 
@@ -85,11 +87,18 @@ class TagParser(HTMLParser):
 
     def _parse_attrs(self, attrs: list[tuple[str, str | None]]) -> dict[str, str]:
         attrs_dict = dict()
+        bare_attrs = []
 
         for k, v in attrs:
             attrs_dict[k] = default(v, k)
-            if not exists(v) and not any(a in attrs_dict for a in CHUNK_ATTRS):
-                attrs_dict['chunks'] = k
+
+            if not exists(v):
+                bare_attrs.append(k)
+
+        # bare attributes are chunk ids - <focus 1, 3> arrives as two bare attrs
+
+        if bare_attrs and not any(a in attrs_dict for a in CHUNK_ATTRS if a != 'chunks'):
+            attrs_dict['chunks'] = ' '.join([attrs_dict.get('chunks', ''), *bare_attrs]).strip()
 
         return attrs_dict
 
@@ -133,6 +142,12 @@ class TagStateMachine:
         self.active_chunks = None
         self.parser = TagParser(on_tag = self._on_tag)
 
+    def reset(self):
+        self.stack.clear()
+        self.state.clear()
+        self.active_chunks = None
+        self.parser = TagParser(on_tag = self._on_tag)
+
     def _snapshot(self):
         chunks = self.active_chunks
         return (
@@ -144,16 +159,21 @@ class TagStateMachine:
         self.state, self.active_chunks = snapshot
 
     def step(self, token: int | Tensor | str | Sequence):
-        tokens, _ = tree_flatten_with_inverse(tree_map_tensor(
-            lambda t: t.tolist() if t.numel() > 1 else t.item(),
-            token
-        ))
+        if isinstance(token, str):
+            self.parser.feed(token)
+            return
 
-        for one_token in tokens:
-            decoded = self.tokenizer_decode(one_token) if isinstance(one_token, int) else str(one_token)
+        if isinstance(token, Tensor):
+            token = token.tolist() if token.numel() > 1 else token.item()
 
-            if exists(decoded):
-                self.parser.feed(decoded)
+        if isinstance(token, (list, tuple)):
+            for one_token in token:
+                self.step(one_token)
+            return
+
+        decoded = self.tokenizer_decode(token)
+        if exists(decoded):
+            self.parser.feed(decoded)
 
     def on(self, tag: str, fn: Callable | None = None):
         # handler signature - fn(machine, attrs) or fn(machine, attrs, is_closing)
@@ -192,7 +212,7 @@ class TagStateMachine:
                     continue
 
                 self._restore(snapshot)
-                self.stack.pop(i)
+                self.stack = self.stack[:i]
                 break
 
             if accepts_is_closing(handler):
@@ -299,24 +319,25 @@ class DeclarativeAttention(TagStateMachine):
             template = template
         )
 
-    @property
-    def mode(self):
-        if self.active_chunks == self.all_chunks:
-            return 'global'
-
-        return 'focus' if self.active_chunks else 'local'
+    def reset(self):
+        super().reset()
+        self.active_chunks = set(self.all_chunks)
 
     @property
     def is_global(self):
-        return self.mode == 'global'
-
-    @property
-    def is_focus(self):
-        return self.mode == 'focus'
+        return self.active_chunks == self.all_chunks
 
     @property
     def is_local(self):
-        return self.mode == 'local'
+        return len(self.active_chunks) == 0
+
+    @property
+    def is_focus(self):
+        return not self.is_global and not self.is_local
+
+    @property
+    def mode(self):
+        return 'global' if self.is_global else ('focus' if self.is_focus else 'local')
 
     def get_mask(self, total_len: int, device = None) -> Tensor:
         # 1d boolean mask over KV positions - True = attended
@@ -331,6 +352,9 @@ class DeclarativeAttention(TagStateMachine):
                 mask[start:end] = False
 
         return mask
+
+    def __call__(self, total_len: int, device = None) -> Tensor:
+        return self.get_mask(total_len, device = device)
 
     def get_block_mask(self, total_len: int, device = None) -> Tensor:
         # block-aligned mask - a block is kept if any of its tokens is attended,
@@ -378,16 +402,19 @@ def derive_declarative_mask(
 
     masks = []
 
+    tokens_list = tokens.tolist()
+
     for b, spans in enumerate(batch_spans):
         machine = DeclarativeAttention(spans, tokenizer_decode = tokenizer_decode)
         mask = torch.zeros((seq_len, seq_len), dtype = torch.bool, device = device)
+        seq_tokens = tokens_list[b]
 
         for i in range(seq_len):
             mask[i] = machine.get_mask(seq_len, device = device)
             mask[i, i + 1:] = False
 
             if not exists(prompt_len) or i >= prompt_len:
-                machine.step(tokens[b, i])
+                machine.step(seq_tokens[i])
 
         masks.append(mask)
 
@@ -410,7 +437,8 @@ SPLIT_PATTERNS = (
 
 def count_tokens(text, tokenizer_encode = None):
     if exists(tokenizer_encode):
-        return len(tokenizer_encode(text))
+        tokens = tokenizer_encode(text)
+        return tokens.numel() if isinstance(tokens, Tensor) else len(tokens)
 
     return max(1, len(text) // 4)
 

@@ -52,6 +52,9 @@ class DeclarativeVLLMHook:
     def unregister_request(self, request_id: str):
         self.machines.pop(request_id, None)
 
+    register = register_request
+    unregister = unregister_request
+
     def step(self, request_id: str, token: int | Tensor | str):
         # feeds a generated token to a request's state machine
 
@@ -94,11 +97,23 @@ class DeclarativeVLLMHook:
             if not exists(machine):
                 continue
 
-            kept = machine.get_kept_blocks(int(seq_lens_list[i]))
+            seq_len = int(seq_lens_list[i])
+            kept = machine.get_kept_blocks(seq_len)
 
             new_block_tables[i] = 0
             new_block_tables[i, :len(kept)] = block_tables[i, kept]
-            new_seq_lens[i] = len(kept) * self.block_size
+
+            last_block = (seq_len - 1) // self.block_size
+            last_block_len = (seq_len - 1) % self.block_size + 1
+
+            # if the last (partial) block survived, the compacted length ends
+            # inside it - otherwise every kept block is full
+
+            new_seq_lens[i] = (
+                (len(kept) - 1) * self.block_size + last_block_len
+                if last_block in kept
+                else len(kept) * self.block_size
+            )
 
         if is_single:
             return new_block_tables[0], new_seq_lens[0]

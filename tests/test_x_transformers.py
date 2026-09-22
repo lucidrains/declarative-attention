@@ -281,4 +281,9 @@ def test_generation_strict_false_during_generate_continues():
     )
     assert out.shape == (1, 3)
 
-
+def test_forward_1d_tensor():
+    wrapper = make_wrapper()
+    chunk_spans = [(2, 4)]
+    x_1d = torch.randint(1, 10, (16,))
+    loss = wrapper(x_1d, chunk_spans = chunk_spans)
+    assert loss.ndim == 0 and not torch.isnan(loss)
